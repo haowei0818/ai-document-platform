@@ -7,3 +7,4 @@ urlpatterns = [
     path('login/', TokenObtainPairView.as_view(), name='login'),
     path('me/', MeView.as_view(), name='me'),
 ]
+

@@ -54,3 +54,39 @@ class RegisterTests(APITestCase):
         response = self.client.post(self.register_url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+class LoginTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='testuser',
+            password='testpass123'
+        )
+        self.login_url = reverse('login')
+    
+    def test_login_success(self):
+        """測試項目 1：帳號密碼都正確，應該成功拿到 token"""
+        data = {
+            "username": "testuser",
+            "password": "testpass123"
+        }
+        response = self.client.post(self.login_url, data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+
+    def test_login_wrong_password(self):
+        data = {
+            "username": "testuser",
+            "password": "wrongpass111"
+        }
+        response = self.client.post(self.login_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_login_nonexistent_user(self):
+        data = {
+            "username": "nonexistentuser",
+            "password": "somepass123"
+        }
+        response = self.client.post(self.login_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
