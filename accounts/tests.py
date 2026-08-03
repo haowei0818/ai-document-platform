@@ -90,3 +90,27 @@ class LoginTests(APITestCase):
         }
         response = self.client.post(self.login_url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+class MeViewTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='testuser',
+            password='testpass123'
+        )
+        self.login_url = reverse('login')
+    def test_me_success(self):
+        """測試項目 4：登入後，使用 token 取得自己的資訊"""
+        # 先登入拿到 token
+        data = {
+            "username": "testuser",
+            "password": "testpass123"
+        }
+        response = self.client.post(self.login_url, data, format='json')
+        access_token = response.data['access']
+
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access_token}')
+        me_url = reverse('me')
+        response = self.client.get(me_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['username'], 'testuser')
