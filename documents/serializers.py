@@ -6,3 +6,6 @@ class DocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Document
         fields = ['id', 'title', 'file', 'uploaded_at']
+
+class DocumentAskSerializer(serializers.Serializer):
+    question = serializers.CharField()
