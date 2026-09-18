@@ -88,3 +88,36 @@ class DocumentTests(APITestCase):
         self.client.force_authenticate(user=self.user_b)
         response = self.client.delete(reverse('document-delete', args=[doc_id]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_ask_success(self):
+        self.client.force_authenticate(user=self.user_a)
+        with open('test.txt', 'w') as f:
+            f.write('公司地址位於台北市信義區松仁路100號。')
+        with open('test.txt', 'rb') as f:
+            self.client.post(reverse('document-upload'), {'title': '公司地址文件', 'file': f})
+
+        response = self.client.post(reverse('document-ask'), {'question': '公司在哪裡?'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('answer', response.data)
+        self.assertTrue(len(response.data['answer']) > 0)
+        source_titles = [s['title'] for s in response.data['sources']]
+        self.assertIn('公司地址文件', source_titles)
+
+    def test_ask_unauthenticated(self):
+        response = self.client.post(reverse('document-ask'), {'question': '隨便問一個問題'})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_ask_does_not_leak_other_users_documents(self):
+        self.client.force_authenticate(user=self.user_a)
+        with open('test.txt', 'w') as f:
+            f.write('特殊通關密語是紫色的獨角獸在跳舞。')
+        with open('test.txt', 'rb') as f:
+            self.client.post(reverse('document-upload'), {'title': 'A的秘密文件', 'file': f})
+
+        self.client.force_authenticate(user=self.user_b)
+        response = self.client.post(reverse('document-ask'), {'question': '特殊通關密語是什麼?'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        source_titles = [s['title'] for s in response.data['sources']]
+        self.assertNotIn('A的秘密文件', source_titles)

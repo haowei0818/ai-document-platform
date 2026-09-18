@@ -1,3 +1,6 @@
+import uuid
+
+
 def chunk_text(text, chunk_size=500, overlap=50):
     chunks = []
     start = 0
@@ -41,8 +44,14 @@ def get_gemini_client():
 
 def get_chroma_collection():
     import chromadb
+    from django.conf import settings
 
-    chroma_client = chromadb.PersistentClient(path="./chroma_db")
+    if getattr(settings, 'TESTING', False):
+        path = "./chroma_db_test"
+    else:
+        path = "./chroma_db"
+
+    chroma_client = chromadb.PersistentClient(path=path)
     return chroma_client.get_or_create_collection(name="documents")
 
 
@@ -58,8 +67,9 @@ def process_document_for_rag(document):
             model='gemini-embedding-001',
             contents=chunk
         )
+        unique_id = f"doc{document.id}_chunk{i}_{uuid.uuid4().hex[:8]}"
         collection.add(
-            ids=[f"doc{document.id}_chunk{i}"],
+            ids=[unique_id],
             embeddings=[result.embeddings[0].values],
             documents=[chunk],
             metadatas=[{
