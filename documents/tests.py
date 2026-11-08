@@ -26,6 +26,26 @@ class FakeLLMService:
         return '這是測試用的假回答'
 
 
+class FailingLLMService(FakeLLMService):
+    """一打電話就失敗"""
+
+    def embed(self, text):
+        raise RuntimeError('模擬 LLM 失敗')
+
+
+class FailOnSecondEmbedLLMService(FakeLLMService):
+    """第 1 段成功、第 2 段才失敗：模擬處理到一半壞掉"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, text):
+        self.calls += 1
+        if self.calls >= 2:
+            raise RuntimeError('模擬處理到一半失敗')
+        return super().embed(text)
+
+
 class DocumentTests(APITestCase):
     @classmethod
     def setUpClass(cls):
@@ -59,9 +79,69 @@ class DocumentTests(APITestCase):
         self.user_a = User.objects.create_user(username='user_a', password='testpass123')
         self.user_b = User.objects.create_user(username='user_b', password='testpass123')
 
-    def _upload(self, title='我的文件', content='測試內容'):
+    def _upload(self, title='我的文件', content='測試內容', extra=None):
         file = SimpleUploadedFile('test.txt', content.encode('utf-8'))
-        return self.client.post(reverse('document-upload'), {'title': title, 'file': file})
+        data = {'title': title, 'file': file, **(extra or {})}
+        return self.client.post(reverse('document-upload'), data)
+
+    def _use_llm(self, llm_class):
+        for target in ('documents.rag_utils.LLMService', 'documents.views.LLMService'):
+            patcher = patch(target, llm_class)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _chunk_ids(self, document_id):
+        return rag_utils.get_chroma_collection().get(where={'document_id': document_id})['ids']
+
+    # ---------- T3：上傳處理狀態 ----------
+
+    def test_upload_sets_status_ready(self):
+        self.client.force_authenticate(user=self.user_a)
+        response = self._upload()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'ready')
+        self.assertEqual(Document.objects.get(id=response.data['id']).status, 'ready')
+
+    def test_upload_llm_failure_marks_failed(self):
+        self._use_llm(FailingLLMService)
+        self.client.force_authenticate(user=self.user_a)
+        response = self._upload()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['status'], 'failed')
+        doc = Document.objects.get(id=response.data['id'])  # 文件仍然保留
+        self.assertEqual(doc.status, 'failed')
+        self.assertEqual(self._chunk_ids(doc.id), [])
+
+    def test_upload_partial_failure_leaves_no_chunks(self):
+        self._use_llm(FailOnSecondEmbedLLMService)
+        self.client.force_authenticate(user=self.user_a)
+        response = self._upload(content='長' * 1200)  # 超過 500 字，會切成好幾段
+        self.assertEqual(response.data['status'], 'failed')
+        self.assertEqual(self._chunk_ids(response.data['id']), [])
+
+    def test_failed_document_not_in_ask_sources(self):
+        self.client.force_authenticate(user=self.user_a)
+        self._use_llm(FailOnSecondEmbedLLMService)
+        self._upload('失敗的文件', '失' * 1200)
+        self._use_llm(FakeLLMService)
+        self._upload('正常的文件', '正常內容')
+
+        response = self.client.post(reverse('document-ask'), {'question': '問題'})
+        source_titles = [s['title'] for s in response.data['sources']]
+        self.assertNotIn('失敗的文件', source_titles)
+
+    def test_upload_ignores_client_status(self):
+        self._use_llm(FailingLLMService)
+        self.client.force_authenticate(user=self.user_a)
+        response = self._upload(extra={'status': 'ready'})
+        self.assertEqual(response.data['status'], 'failed')
+        self.assertEqual(Document.objects.get(id=response.data['id']).status, 'failed')
+
+    def test_list_shows_status(self):
+        self.client.force_authenticate(user=self.user_a)
+        self._upload()
+        response = self.client.get(reverse('document-list'))
+        self.assertEqual(response.data[0]['status'], 'ready')
 
     def test_upload_success(self):
         self.client.force_authenticate(user=self.user_a)
