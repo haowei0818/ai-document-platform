@@ -115,6 +115,17 @@ class DocumentTests(APITestCase):
         response = self.client.delete(reverse('document-delete', args=[doc_id]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_delete_removes_document_chunks(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload().data['id']
+        other_id = self._upload('其他文件', '其他內容').data['id']
+
+        self.client.delete(reverse('document-delete', args=[doc_id]))
+
+        collection = rag_utils.get_chroma_collection()
+        self.assertEqual(collection.get(where={'document_id': doc_id})['ids'], [])
+        self.assertNotEqual(collection.get(where={'document_id': other_id})['ids'], [])
+
     def test_ask_success(self):
         self.client.force_authenticate(user=self.user_a)
         self._upload('公司地址文件', '公司地址位於台北市信義區松仁路100號。')
