@@ -34,17 +34,26 @@ def extract_text_from_file(file_path):
         raise ValueError(f"不支援的檔案格式: {file_path}")
 
 
+_chroma_client = None
+
+
+def get_chroma_client():
+    """取得共用的 Chroma 倉庫；第一次用到才建立（正式環境存在硬碟）。"""
+    global _chroma_client
+    if _chroma_client is None:
+        import chromadb
+        _chroma_client = chromadb.PersistentClient(path="./chroma_db")
+    return _chroma_client
+
+
+def set_chroma_client(client):
+    """替換 Chroma 倉庫，讓測試可以改用記憶體模式。"""
+    global _chroma_client
+    _chroma_client = client
+
+
 def get_chroma_collection():
-    import chromadb
-    from django.conf import settings
-
-    if getattr(settings, 'TESTING', False):
-        path = "./chroma_db_test"
-    else:
-        path = "./chroma_db"
-
-    chroma_client = chromadb.PersistentClient(path=path)
-    return chroma_client.get_or_create_collection(name="documents")
+    return get_chroma_client().get_or_create_collection(name="documents")
 
 
 def process_document_for_rag(document, llm=None):
