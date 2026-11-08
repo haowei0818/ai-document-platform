@@ -1,5 +1,3 @@
-import logging
-
 from django.shortcuts import render
 from rest_framework import generics
 from rest_framework.views import APIView
@@ -7,11 +5,8 @@ from rest_framework.response import Response
 from .models import Document
 from .serializers import DocumentSerializer, DocumentAskSerializer
 from rest_framework.permissions import IsAuthenticated
-from .rag_utils import process_document_for_rag, get_chroma_collection, delete_document_chunks
+from .rag_utils import process_document, get_chroma_collection, delete_document_chunks
 from .llm_service import LLMService
-
-
-logger = logging.getLogger(__name__)
 
 
 class DocumentUploadView(generics.CreateAPIView):
@@ -19,17 +14,8 @@ class DocumentUploadView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
-        instance = serializer.save(user=self.request.user, status=Document.Status.PENDING)
-        delete_document_chunks(instance.id)  # 先清掉舊 chunk
-        try:
-            process_document_for_rag(instance)
-            instance.status = Document.Status.READY
-        except Exception:
-            # log 只記 document_id，不記文件內容
-            logger.exception('document processing failed: document_id=%s', instance.id)
-            delete_document_chunks(instance.id)  # 清掉處理到一半寫進去的 chunk
-            instance.status = Document.Status.FAILED
-        instance.save(update_fields=['status'])
+        instance = serializer.save(user=self.request.user)
+        process_document(instance)
 
 
 class DocumentListView(generics.ListAPIView):

@@ -1,6 +1,10 @@
+import logging
 import uuid
 
 from .llm_service import LLMService
+from .models import Document
+
+logger = logging.getLogger(__name__)
 
 
 def chunk_text(text, chunk_size=500, overlap=50):
@@ -61,7 +65,28 @@ def delete_document_chunks(document_id):
     get_chroma_collection().delete(where={'document_id': document_id})
 
 
-def process_document_for_rag(document, llm=None):
+def process_document(document, llm=None):
+    """處理一份文件：pending → 清舊 chunk → 建立 chunk → ready；失敗時清掉殘留並改成 failed。
+
+    上傳和重新處理（T5）都走這個流程。任何錯誤都會被接住並寫進 log，不會往外丟。
+    """
+    document.status = Document.Status.PENDING
+    document.save(update_fields=['status'])
+    delete_document_chunks(document.id)  # 先清掉舊 chunk
+    try:
+        _index_chunks(document, llm)
+        document.status = Document.Status.READY
+    except Exception:
+        # log 只記 document_id，不記文件內容
+        logger.exception('document processing failed: document_id=%s', document.id)
+        delete_document_chunks(document.id)  # 清掉處理到一半寫進去的 chunk
+        document.status = Document.Status.FAILED
+    document.save(update_fields=['status'])
+    return document
+
+
+def _index_chunks(document, llm=None):
+    """讀檔 → 切段 → 向量化 → 寫入 Chroma（內部步驟，失敗會直接丟出錯誤）。"""
     llm = llm or LLMService()
     collection = get_chroma_collection()
 

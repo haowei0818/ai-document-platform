@@ -105,7 +105,9 @@ class DocumentTests(APITestCase):
     def test_upload_llm_failure_marks_failed(self):
         self._use_llm(FailingLLMService)
         self.client.force_authenticate(user=self.user_a)
-        response = self._upload()
+        with self.assertLogs('documents.rag_utils', level='ERROR') as logs:
+            response = self._upload()
+        self.assertIn(f"document_id={response.data['id']}", logs.output[0])  # 錯誤有被記錄
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['status'], 'failed')
         doc = Document.objects.get(id=response.data['id'])  # 文件仍然保留
@@ -115,14 +117,16 @@ class DocumentTests(APITestCase):
     def test_upload_partial_failure_leaves_no_chunks(self):
         self._use_llm(FailOnSecondEmbedLLMService)
         self.client.force_authenticate(user=self.user_a)
-        response = self._upload(content='長' * 1200)  # 超過 500 字，會切成好幾段
+        with self.assertLogs('documents.rag_utils', level='ERROR'):
+            response = self._upload(content='長' * 1200)  # 超過 500 字，會切成好幾段
         self.assertEqual(response.data['status'], 'failed')
         self.assertEqual(self._chunk_ids(response.data['id']), [])
 
     def test_failed_document_not_in_ask_sources(self):
         self.client.force_authenticate(user=self.user_a)
         self._use_llm(FailOnSecondEmbedLLMService)
-        self._upload('失敗的文件', '失' * 1200)
+        with self.assertLogs('documents.rag_utils', level='ERROR'):
+            self._upload('失敗的文件', '失' * 1200)
         self._use_llm(FakeLLMService)
         self._upload('正常的文件', '正常內容')
 
@@ -133,7 +137,8 @@ class DocumentTests(APITestCase):
     def test_upload_ignores_client_status(self):
         self._use_llm(FailingLLMService)
         self.client.force_authenticate(user=self.user_a)
-        response = self._upload(extra={'status': 'ready'})
+        with self.assertLogs('documents.rag_utils', level='ERROR'):
+            response = self._upload(extra={'status': 'ready'})
         self.assertEqual(response.data['status'], 'failed')
         self.assertEqual(Document.objects.get(id=response.data['id']).status, 'failed')
 
