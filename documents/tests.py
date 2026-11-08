@@ -5,7 +5,9 @@ from unittest.mock import patch
 import chromadb
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import override_settings
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
+from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -180,3 +182,31 @@ class DocumentTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         source_titles = [s['title'] for s in response.data['sources']]
         self.assertNotIn('A的秘密文件', source_titles)
+
+
+class DocumentStatusMigrationTests(TransactionTestCase):
+    """用時光機測 migration：倒帶到沒有 status 的過去，放一份舊文件，再快轉回來。"""
+
+    before = [('documents', '0002_alter_document_file')]
+    after = [('documents', '0003_document_status')]
+
+    def tearDown(self):
+        # 不管測試成功或失敗，都把資料庫結構還原到最新版，避免影響其他測試
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+    def test_existing_documents_become_ready(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.before)
+        old_apps = executor.loader.project_state(self.before).apps
+        OldUser = old_apps.get_model('auth', 'User')
+        OldDocument = old_apps.get_model('documents', 'Document')
+        user = OldUser.objects.create(username='old_user')
+        OldDocument.objects.create(user=user, title='舊文件', file='uploads/old.txt')
+
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(self.after)
+        new_apps = executor.loader.project_state(self.after).apps
+        NewDocument = new_apps.get_model('documents', 'Document')
+        self.assertEqual(NewDocument.objects.get(title='舊文件').status, 'ready')
