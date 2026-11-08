@@ -126,6 +126,34 @@ class DocumentTests(APITestCase):
         self.assertEqual(collection.get(where={'document_id': doc_id})['ids'], [])
         self.assertNotEqual(collection.get(where={'document_id': other_id})['ids'], [])
 
+    def test_deleted_document_not_in_ask_sources(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload('要刪的文件', '公司地址位於台北市').data['id']
+        self.client.delete(reverse('document-delete', args=[doc_id]))
+
+        response = self.client.post(reverse('document-ask'), {'question': '公司在哪裡?'})
+        source_titles = [s['title'] for s in response.data['sources']]
+        self.assertNotIn('要刪的文件', source_titles)
+
+    def test_delete_does_not_affect_other_users_chunks(self):
+        self.client.force_authenticate(user=self.user_b)
+        b_doc_id = self._upload('B的文件', 'B的內容').data['id']
+        self.client.force_authenticate(user=self.user_a)
+        a_doc_id = self._upload().data['id']
+
+        self.client.delete(reverse('document-delete', args=[a_doc_id]))
+
+        collection = rag_utils.get_chroma_collection()
+        self.assertNotEqual(collection.get(where={'document_id': b_doc_id})['ids'], [])
+
+    def test_delete_document_without_chunks(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload().data['id']
+        rag_utils.delete_document_chunks(doc_id)  # 模擬「Chroma 裡本來就沒有向量」
+
+        response = self.client.delete(reverse('document-delete', args=[doc_id]))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
     def test_ask_success(self):
         self.client.force_authenticate(user=self.user_a)
         self._upload('公司地址文件', '公司地址位於台北市信義區松仁路100號。')
