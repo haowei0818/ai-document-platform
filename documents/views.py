@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from .models import Document
 from .serializers import DocumentSerializer, DocumentAskSerializer
 from rest_framework.permissions import IsAuthenticated
-from .rag_utils import process_document_for_rag, get_chroma_collection
+from .rag_utils import process_document_for_rag, get_chroma_collection, delete_document_chunks
 from .llm_service import LLMService
 
 
@@ -32,6 +32,10 @@ class DocumentDeleteView(generics.DestroyAPIView):
 
     def get_queryset(self):
         return Document.objects.filter(user=self.request.user)
+
+    def perform_destroy(self, instance):
+        delete_document_chunks(instance.id)   # 先刪向量：萬一失敗，文件還在但不會外洩
+        instance.delete()                     # 再刪資料庫紀錄
 
 
 class DocumentAskView(APIView):

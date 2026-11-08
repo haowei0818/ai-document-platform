@@ -56,6 +56,11 @@ def get_chroma_collection():
     return get_chroma_client().get_or_create_collection(name="documents")
 
 
+def delete_document_chunks(document_id):
+    """刪除某份文件在 Chroma 裡的全部 chunk；沒有 chunk 時什麼都不做。"""
+    get_chroma_collection().delete(where={'document_id': document_id})
+
+
 def process_document_for_rag(document, llm=None):
     llm = llm or LLMService()
     collection = get_chroma_collection()
