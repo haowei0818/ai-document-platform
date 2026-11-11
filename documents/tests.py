@@ -148,6 +148,69 @@ class DocumentTests(APITestCase):
         response = self.client.get(reverse('document-list'))
         self.assertEqual(response.data[0]['status'], 'ready')
 
+    # ---------- T5：手動重新處理 ----------
+
+    def _reprocess(self, document_id):
+        return self.client.post(reverse('document-reprocess', args=[document_id]))
+
+    def test_reprocess_failed_document_becomes_ready(self):
+        self.client.force_authenticate(user=self.user_a)
+        self._use_llm(FailingLLMService)
+        with self.assertLogs('documents.rag_utils', level='ERROR'):
+            doc_id = self._upload().data['id']          # 先做出一份 failed 文件
+
+        self._use_llm(FakeLLMService)                   # 隔天：LLM 恢復正常
+        response = self._reprocess(doc_id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'ready')
+        self.assertEqual(Document.objects.get(id=doc_id).status, 'ready')
+
+        # 驗收條件「可以問答」：問答結果的來源裡要有這份文件
+        response = self.client.post(reverse('document-ask'), {'question': '問題'})
+        self.assertIn('我的文件', [s['title'] for s in response.data['sources']])
+
+    def test_reprocess_twice_is_idempotent(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload(content='長' * 1200).data['id']   # 會切成好幾段
+        first_count = len(self._chunk_ids(doc_id))
+
+        self._reprocess(doc_id)
+        self._reprocess(doc_id)
+
+        self.assertGreater(first_count, 1)                        # 確認真的有多段，測試才有意義
+        self.assertEqual(len(self._chunk_ids(doc_id)), first_count)
+
+    def test_reprocess_unauthenticated(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload().data['id']
+
+        self.client.force_authenticate(user=None)            # 登出
+        response = self._reprocess(doc_id)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_reprocess_other_users_document(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload().data['id']
+
+        self.client.force_authenticate(user=self.user_b)     # 換成別人
+        response = self._reprocess(doc_id)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(Document.objects.get(id=doc_id).status, 'ready')   # 別人的文件沒有被動到
+
+    def test_reprocess_failure_marks_failed_without_chunks(self):
+        self.client.force_authenticate(user=self.user_a)
+        doc_id = self._upload(content='長' * 1200).data['id']   # 先成功上傳，Chroma 裡有 chunk
+
+        self._use_llm(FailOnSecondEmbedLLMService)                # 重新處理時，第 2 段才失敗
+        with self.assertLogs('documents.rag_utils', level='ERROR'):
+            response = self._reprocess(doc_id)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['status'], 'failed')
+        self.assertEqual(Document.objects.get(id=doc_id).status, 'failed')
+        self.assertEqual(self._chunk_ids(doc_id), [])             # 舊的和寫到一半的都沒有殘留
+
     def test_upload_success(self):
         self.client.force_authenticate(user=self.user_a)
         response = self._upload()

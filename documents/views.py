@@ -38,6 +38,18 @@ class DocumentDeleteView(generics.DestroyAPIView):
         instance.delete()                     # 再刪資料庫紀錄
 
 
+class DocumentReprocessView(generics.GenericAPIView):
+    serializer_class = DocumentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Document.objects.filter(user=self.request.user)   # 只找得到自己的文件
+
+    def post(self, request, pk):
+        document = self.get_object()          # 找不到（或不是自己的）→ 自動回 404
+        process_document(document)            # 跟上傳走同一條流程
+        return Response(self.get_serializer(document).data)
+
 class DocumentAskView(APIView):
     permission_classes = [IsAuthenticated]
 
