@@ -1,12 +1,16 @@
+import logging
+
 from django.shortcuts import render
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from .models import Document
 from .serializers import DocumentSerializer, DocumentAskSerializer
 from rest_framework.permissions import IsAuthenticated
 from .rag_utils import process_document, get_chroma_collection, delete_document_chunks
-from .llm_service import LLMService
+from .llm_service import LLMService, LLMUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentUploadView(generics.CreateAPIView):
@@ -58,6 +62,18 @@ class DocumentAskView(APIView):
         serializer.is_valid(raise_exception=True)
         question = serializer.validated_data['question']
 
+        try:
+            return Response(self._answer(question, request.user.id))
+        except LLMUnavailableError:
+            # 細節（含原始 Gemini 錯誤）只寫進 log；只記 user_id，不記問題內容
+            logger.exception('ask failed: llm unavailable, user_id=%s', request.user.id)
+            return Response(
+                {'code': 'llm_unavailable', 'detail': 'AI 服務暫時無法使用，請稍後再試。'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+    def _answer(self, question, user_id):
+        """正常的問答流程：向量化問題 → 查 Chroma → 生成回答。"""
         llm = LLMService()
         collection = get_chroma_collection()
 
@@ -65,17 +81,17 @@ class DocumentAskView(APIView):
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=3,
-            where={'user_id': request.user.id}
+            where={'user_id': user_id}
         )
 
         retrieved_chunks = results['documents'][0]
         metadatas = results['metadatas'][0]
 
         if not retrieved_chunks:
-            return Response({
+            return {
                 'answer': '目前找不到相關的文件內容，請確認是否已上傳相關文件。',
                 'sources': []
-            })
+            }
 
         context = '\n\n'.join(retrieved_chunks)
         prompt = f"""你是一個嚴謹的文件問答助理。請「只根據」以下提供的文件內容回答問題，絕對不要加入文件內容沒有提到的資訊，也不要根據你自己的知識、常識或推測做任何補充或延伸建議。
@@ -96,7 +112,7 @@ class DocumentAskView(APIView):
                 sources.append({'document_id': meta['document_id'], 'title': meta['title']})
                 seen_ids.add(meta['document_id'])
 
-        return Response({
+        return {
             'answer': answer,
             'sources': sources
-        })
+        }

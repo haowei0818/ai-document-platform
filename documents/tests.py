@@ -13,6 +13,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from . import rag_utils
+from .llm_service import LLMUnavailableError
 from .models import Document
 
 
@@ -44,6 +45,24 @@ class FailOnSecondEmbedLLMService(FakeLLMService):
         if self.calls >= 2:
             raise RuntimeError('模擬處理到一半失敗')
         return super().embed(text)
+
+
+class EmbedUnavailableLLMService(FakeLLMService):
+    """向量化時丟出統一例外：模擬 T4 的 LLMService 重試用完後的行為"""
+
+    def embed(self, text):
+        raise LLMUnavailableError('LLM 服務暫時無法使用')
+
+
+# 故意把敏感資訊塞進例外訊息，用來檢查回應有沒有洩漏
+SECRET_ERROR_MESSAGE = 'gemini-3.6-flash AIzaFAKEKEY123 Traceback (most recent call last)'
+
+
+class GenerateUnavailableLLMService(FakeLLMService):
+    """向量化成功、生成時才丟出統一例外"""
+
+    def generate(self, prompt):
+        raise LLMUnavailableError(SECRET_ERROR_MESSAGE)
 
 
 class DocumentTests(APITestCase):
@@ -210,6 +229,37 @@ class DocumentTests(APITestCase):
         self.assertEqual(response.data['status'], 'failed')
         self.assertEqual(Document.objects.get(id=doc_id).status, 'failed')
         self.assertEqual(self._chunk_ids(doc_id), [])             # 舊的和寫到一半的都沒有殘留
+
+    # ---------- T6：問答時 LLM 失敗回 503 ----------
+
+    def test_ask_embed_failure_returns_503(self):
+        self.client.force_authenticate(user=self.user_a)
+        self._upload()                                   # 先用正常的假總機上傳
+        self._use_llm(EmbedUnavailableLLMService)        # 問答時才壞掉
+
+        with self.assertLogs('documents.views', level='ERROR'):
+            response = self.client.post(reverse('document-ask'), {'question': '問題'})
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data, {
+            'code': 'llm_unavailable',
+            'detail': 'AI 服務暫時無法使用，請稍後再試。',
+        })
+
+    def test_ask_generate_failure_returns_503_without_leaking(self):
+        self.client.force_authenticate(user=self.user_a)
+        self._upload()
+        self._use_llm(GenerateUnavailableLLMService)
+
+        with self.assertLogs('documents.views', level='ERROR'):
+            response = self.client.post(reverse('document-ask'), {'question': '問題'})
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data['code'], 'llm_unavailable')
+
+        body = response.content.decode('utf-8')        # 回應的原始內容（真正送到使用者手上的文字）
+        for secret in ['gemini-3.6-flash', 'AIzaFAKEKEY123', 'Traceback']:
+            self.assertNotIn(secret, body)
 
     def test_upload_success(self):
         self.client.force_authenticate(user=self.user_a)
