@@ -5,11 +5,14 @@
 - embed：文字轉成向量
 - generate：根據 prompt 產生回答
 """
+import logging
 import os
 import time
 
 import httpx                      # SDK 底層的網路套件；逾時、連不上時會丟出它的例外
 from google.genai import errors   # 不變條件允許 Service 自己 import SDK
+
+logger = logging.getLogger(__name__)     # 名字是 'documents.llm_service'
 
 
 class LLMUnavailableError(Exception):
@@ -30,6 +33,12 @@ def _is_daily_quota(exc):
             if 'PerDay' in quota_id or 'Daily' in quota_id:
                 return True
     return False                                 # 找不到 → 不是每日額度
+
+
+def _token_count(result):
+    """從回應拿 token 用量；任何一層沒有就回傳 None（embed 的回應通常沒有）。"""
+    usage = getattr(result, 'usage_metadata', None)
+    return getattr(usage, 'total_token_count', None)
 
 
 class LLMService:
@@ -54,18 +63,45 @@ class LLMService:
             self._client = genai.Client(api_key=api_key)
         return self._client
 
-    def _call_with_retry(self, func):
+    def _call_with_retry(self, operation, model, func):
         attempt = 0                                  # 已經重試幾次
+        start = time.monotonic()                     # 開始計時（碼錶，不受電腦校時影響）
         while True:
             try:
-                return func()                        # 成功就直接回傳，離開迴圈
+                result = func()                      # 先存起來，成功後寫完 log 再回傳
             except (errors.APIError, httpx.TransportError) as exc:   # Gemini 有回覆的錯誤 + 所有網路錯誤
                 if not self._is_transient(exc) or attempt >= self.MAX_RETRIES:
+                    self._log_call(operation, model, start, success=False,   # 放棄前先記一筆
+                                   retries=attempt)
                     raise LLMUnavailableError(       # 不值得重試，或重試次數用完 → 放棄
                         'LLM 服務暫時無法使用'        # 不帶內部細節
                     ) from exc                       # 例外鏈：保留原始錯誤給開發者查
                 self._sleep(self.BASE_DELAY * 2 ** attempt)   # 等 1、2、4 秒
                 attempt += 1
+                continue                             # 回到迴圈開頭，再試一次
+            self._log_call(operation, model, start, success=True,
+                           retries=attempt, tokens=_token_count(result))
+            return result
+
+    @staticmethod
+    def _log_call(operation, model, start, success, retries, tokens=None):
+        """寫一筆結構化 log；只放這 6 個欄位，絕不放 prompt 或文件內容。"""
+        fields = {
+            'operation': operation,
+            'model': model,
+            'duration_ms': round((time.monotonic() - start) * 1000),
+            'success': success,
+            'retries': retries,
+            'tokens': tokens,
+        }
+        level = logging.INFO if success else logging.WARNING   # 失敗用 WARNING，比較顯眼
+        logger.log(
+            level,
+            'llm_call operation=%(operation)s model=%(model)s duration_ms=%(duration_ms)s '
+            'success=%(success)s retries=%(retries)s tokens=%(tokens)s',
+            fields,                          # 給人看的訊息：%(欄位名)s 會自動從這個 dict 取值
+            extra={'llm': fields},           # 給程式讀的：同一包欄位掛在 log 紀錄上
+        )
 
     @staticmethod
     def _is_transient(exc):
@@ -80,6 +116,7 @@ class LLMService:
 
     def embed(self, text: str) -> list[float]:
         result = self._call_with_retry(
+            'embed', self.EMBED_MODEL,
             lambda: self._get_client().models.embed_content(
                 model=self.EMBED_MODEL,
                 contents=text,
@@ -89,6 +126,7 @@ class LLMService:
 
     def generate(self, prompt: str) -> str:
         response = self._call_with_retry(
+            'generate', self.GENERATE_MODEL,
             lambda: self._get_client().models.generate_content(
                 model=self.GENERATE_MODEL,
                 contents=prompt,
