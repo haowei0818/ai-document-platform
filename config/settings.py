@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import sys
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -126,4 +127,22 @@ REST_FRAMEWORK = {
 }
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# 是否正在跑測試（python manage.py test）：給下面的 LOGGING 用，跑測試時少印一點 log
+TESTING = 'test' in sys.argv
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,        # 不要關掉 Django 自己的 logger
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler'},   # 印到終端機
+    },
+    'loggers': {
+        'documents': {                        # documents.views、documents.llm_service 等都會套用
+            'handlers': ['console'],
+            'level': 'WARNING' if TESTING else 'INFO',   # 跑測試時只印 WARNING 以上，避免洗版
+            'propagate': False,
+        },
+    },
+}
 
