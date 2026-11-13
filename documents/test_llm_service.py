@@ -81,6 +81,12 @@ def embed_success(values):
     return SimpleNamespace(embeddings=[SimpleNamespace(values=values)])
 
 
+def generate_success(text, total_tokens=None):
+    """做出一個 generate 成功回應；真的回應用 response.usage_metadata.total_token_count 取 token 用量。"""
+    usage = SimpleNamespace(total_token_count=total_tokens) if total_tokens is not None else None
+    return SimpleNamespace(text=text, usage_metadata=usage)
+
+
 class LLMServiceRetryTests(SimpleTestCase):
 
     def test_transient_error_twice_then_success(self):
@@ -184,3 +190,63 @@ class LLMServiceRetryTests(SimpleTestCase):
 
         self.assertEqual(client.models.call_count, 1)  # 只呼叫 1 次
         self.assertEqual(sleep.calls, [])              # 完全沒有等待
+
+
+class LLMServiceLoggingTests(SimpleTestCase):
+
+    def test_successful_call_logs_all_fields(self):
+        client = FakeClient([generate_success('答案', total_tokens=42)])
+        llm = LLMService(client=client, sleep=FakeSleep())
+
+        with self.assertLogs('documents.llm_service', level='INFO') as logs:
+            llm.generate('hello')
+
+        self.assertEqual(len(logs.records), 1)                 # 一次呼叫，剛好一筆 log
+        fields = logs.records[0].llm                           # 讀出 extra 掛上去的那一包欄位
+        self.assertEqual(fields['operation'], 'generate')
+        self.assertEqual(fields['model'], LLMService.GENERATE_MODEL)
+        self.assertIsInstance(fields['duration_ms'], int)      # 耗時每次都不同，只檢查型別
+        self.assertTrue(fields['success'])
+        self.assertEqual(fields['retries'], 0)
+        self.assertEqual(fields['tokens'], 42)
+
+    def test_failed_call_logs_retries(self):
+        client = FakeClient([server_error()] * 4)            # 第 1 次 + 重試 3 次，全部失敗
+        llm = LLMService(client=client, sleep=FakeSleep())
+
+        with self.assertLogs('documents.llm_service', level='INFO') as logs:
+            with self.assertRaises(LLMUnavailableError):
+                llm.embed('hello')
+
+        self.assertEqual(len(logs.records), 1)                 # 重試 3 次也只有一筆
+        record = logs.records[0]
+        self.assertEqual(record.levelname, 'WARNING')          # 失敗用 WARNING
+        self.assertEqual(record.llm['operation'], 'embed')
+        self.assertFalse(record.llm['success'])
+        self.assertEqual(record.llm['retries'], 3)
+        self.assertIsNone(record.llm['tokens'])                # 失敗了，當然沒有 token 用量
+
+    def test_missing_token_usage_still_logs(self):
+        client = FakeClient([embed_success([0.1])])            # embed 的回應沒有 usage_metadata
+        llm = LLMService(client=client, sleep=FakeSleep())
+
+        with self.assertLogs('documents.llm_service', level='INFO') as logs:
+            llm.embed('hello')
+
+        self.assertIsNone(logs.records[0].llm['tokens'])
+
+    def test_logs_never_contain_prompt(self):
+        secret = '機密文件內容-SECRET-12345'
+        client = FakeClient([generate_success('答案', total_tokens=1), client_error_400()])
+        llm = LLMService(client=client, sleep=FakeSleep())
+
+        with self.assertLogs('documents.llm_service', level='INFO') as logs:
+            llm.generate(secret)                               # 成功的呼叫
+            with self.assertRaises(LLMUnavailableError):
+                llm.embed(secret)                              # 失敗的呼叫
+
+        self.assertEqual(len(logs.records), 2)
+        for line in logs.output:                               # 給人看的訊息
+            self.assertNotIn(secret, line)
+        for record in logs.records:                            # 給程式讀的欄位
+            self.assertNotIn(secret, str(record.llm))
