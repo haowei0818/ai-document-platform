@@ -134,6 +134,89 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+## 實際操作範例
+
+以下是在本機實際執行的結果（`<token>` 為登入取得的 JWT）。流程中刻意用錯誤的 API key 啟動伺服器，展示 AI 服務失敗時的行為，再換回正確的 key 重新處理。
+
+**1. 註冊、登入**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/accounts/register/ \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"demo_user","email":"demo@example.com","password":"DemoPass123!"}'
+# {"username":"demo_user","email":"demo@example.com"}
+
+curl -X POST http://127.0.0.1:8000/api/accounts/login/ \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"demo_user","password":"DemoPass123!"}'
+# {"refresh":"...","access":"<token>"}
+```
+
+**2. AI 服務失敗時上傳：文件仍然收下，狀態為 `failed`**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/documents/upload/ \
+  -H 'Authorization: Bearer <token>' \
+  -F 'title=公司資訊' -F 'file=@company.txt'
+# HTTP 201
+# {"id":9,"title":"公司資訊","file":"http://127.0.0.1:8000/media/uploads/company.txt","uploaded_at":"2026-11-13T15:18:03.873393Z","status":"failed"}
+```
+
+**3. AI 服務失敗時問答：回 `503`，不洩漏內部錯誤**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/documents/ask/ \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"公司在哪裡？"}'
+# HTTP 503
+# {"code":"llm_unavailable","detail":"AI 服務暫時無法使用，請稍後再試。"}
+```
+
+此時伺服器 log（只記錄欄位，不含問題、文件內容或 API key）：
+
+```
+llm_call operation=embed model=gemini-embedding-001 duration_ms=62 success=False retries=0 tokens=None
+ask failed: llm unavailable, user_id=5
+```
+
+Gemini 對錯誤的 API key 回 `400 INVALID_ARGUMENT`，被判斷為持續性錯誤，所以沒有重試（`retries=0`）。
+
+**4. 換回正確的 key，重新處理：變成 `ready`**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/documents/9/reprocess/ \
+  -H 'Authorization: Bearer <token>'
+# HTTP 200
+# {"id":9,"title":"公司資訊","file":"http://127.0.0.1:8000/media/uploads/company.txt","uploaded_at":"2026-11-13T15:18:03.873393Z","status":"ready"}
+```
+
+**5. 問答**
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/documents/ask/ \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"公司在哪裡？"}'
+# HTTP 200
+# {"answer":"公司位於台北市信義區松仁路100號。","sources":[{"document_id":9,"title":"公司資訊"}]}
+```
+
+**6. 刪除文件後再問：向量同步清除，問不到了**
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/api/documents/9/ \
+  -H 'Authorization: Bearer <token>'
+# HTTP 204
+
+curl -X POST http://127.0.0.1:8000/api/documents/ask/ \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"公司在哪裡？"}'
+# HTTP 200
+# {"answer":"目前找不到相關的文件內容，請確認是否已上傳相關文件。","sources":[]}
+```
+
 ## 測試
 
 測試分成兩種：
