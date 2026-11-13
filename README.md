@@ -11,6 +11,7 @@
 - 刪除文件時同步清除向量資料庫裡的段落，不會殘留在問答結果中
 - 針對使用者自己上傳過的所有文件進行自然語言問答（RAG）
 - AI 服務暫時性錯誤自動重試；服務無法使用時回傳清楚的 503，不洩漏內部細節
+- 每次 AI 呼叫都留下結構化 log（耗時、重試次數、token 用量），log 不含 prompt 或文件內容
 - 每位使用者的文件與問答結果彼此隔離，互不可見
 
 ## 技術棧
@@ -73,6 +74,25 @@ LLM Service 會先把錯誤分類，再決定要不要重試（最多 3 次，�
 
 錯誤細節只寫進 log，log 與 API 回應都不包含 prompt、文件內容或內部錯誤訊息。
 
+### LLM 呼叫 log
+
+每次 `embed` / `generate` 都會寫一筆結構化 log（一次呼叫一筆，重試次數記在 `retries`）：
+
+```
+INFO:documents.llm_service:llm_call operation=generate model=gemini-3.6-flash duration_ms=850 success=True retries=0 tokens=1234
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `operation` | `embed` 或 `generate` |
+| `model` | 模型名稱 |
+| `duration_ms` | 耗時（毫秒，包含重試等待時間） |
+| `success` | 成功或失敗；成功為 `INFO`，失敗為 `WARNING` |
+| `retries` | 重試次數 |
+| `tokens` | token 用量；Gemini 沒有回傳時為 `None`（embed 的回應沒有這個欄位） |
+
+同一包欄位也放在 log 紀錄的 `extra={'llm': ...}`，方便程式讀取或之後轉成 JSON。
+
 ## API 清單
 
 | 方法 | 路徑 | 說明 | 需要登入 |
@@ -96,7 +116,17 @@ cd ai-document-platform
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+```
 
+### 只跑測試（不需要 API key）
+
+```bash
+python manage.py test
+```
+
+### 啟動伺服器（需要 Gemini API key）
+
+```bash
 # 在專案根目錄建立 .env，填入自己的 Gemini API Key
 echo "GEMINI_API_KEY=你的Key" > .env
 
@@ -106,21 +136,37 @@ python manage.py runserver
 
 ## 測試
 
-```bash
-python manage.py test
-```
+測試分成兩種：
+
+| 種類 | 指令 | 需要 API key | 打網路 |
+|---|---|---|---|
+| 一般測試（預設） | `python manage.py test` | 否 | 否 |
+| 真實 Gemini 整合測試 | `RUN_LLM_INTEGRATION=1 python manage.py test documents.test_integration` | 是 | 是（單次 2 個請求） |
+
+### 一般測試
 
 **不需要 API key、不打網路**：測試會把 LLM 換成假的實作，Chroma 改用記憶體模式，上傳檔案存到暫存資料夾，跑完不留任何檔案。
 
-目前共 44 個自動化測試：
+目前共 50 個自動化測試，預設執行 48 個，2 個整合測試會顯示為已跳過（`OK (skipped=2)`）：
 
 | 模組 | 數量 | 涵蓋內容 |
 |---|---|---|
 | 帳號（`accounts/tests.py`） | 7 | 註冊、登入、取得使用者資訊 |
 | 文件（`documents/tests.py`） | 29 | 上傳、列表、刪除、問答、處理狀態、重新處理、503 錯誤處理，以及未登入、跨使用者隔離、不殘留向量、不洩漏內部細節 |
-| LLM Service（`documents/test_llm_service.py`） | 8 | 錯誤分類與重試：暫時性錯誤重試後成功、重試用完、持續性錯誤不重試、429 每日額度、逾時與連線錯誤 |
+| LLM Service（`documents/test_llm_service.py`） | 12 | 錯誤分類與重試（暫時性錯誤重試後成功、重試用完、持續性錯誤不重試、429 每日額度、逾時與連線錯誤），以及呼叫 log（欄位完整、失敗記重試次數、沒有 token 用量、不含 prompt） |
+| 整合測試（`documents/test_integration.py`） | 2 | 預設跳過；真的呼叫 Gemini，確認 `embed` 回傳 3072 維向量、`generate` 回傳文字且有 token 用量 |
 
 開發時採用 TDD（先寫測試、確認紅燈、再實作），一跑就通過的測試會用「暫時改壞程式、確認測試變紅」的方式驗證它真的有效。
+
+### 真實 Gemini 整合測試
+
+用來偶爾確認 mock 和現實沒有脫節（例如 Gemini 改了回傳格式或模型下架）。預設跳過，需要 `.env` 裡有 `GEMINI_API_KEY`：
+
+```bash
+RUN_LLM_INTEGRATION=1 python manage.py test documents.test_integration
+```
+
+整合測試內關閉重試，單次執行固定只會用到 2 個請求（embed 1 次、generate 1 次），不會大量消耗免費額度。
 
 ## 已知限制
 
