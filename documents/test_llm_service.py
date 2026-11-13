@@ -1,5 +1,9 @@
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
+from django.conf import settings
 from django.test import SimpleTestCase
 from google.genai import errors
 import httpx
@@ -250,3 +254,20 @@ class LLMServiceLoggingTests(SimpleTestCase):
             self.assertNotIn(secret, line)
         for record in logs.records:                            # 給程式讀的欄位
             self.assertNotIn(secret, str(record.llm))
+
+
+class LoggingConfigTests(SimpleTestCase):
+
+    def test_info_logs_are_visible_outside_tests(self):
+        """模擬 runserver：在測試環境以外，documents 的 INFO log 要真的印出來。"""
+        code = (
+            'import logging, django; django.setup(); '
+            'logging.getLogger("documents.llm_service").info("probe-visible")'
+        )
+        result = subprocess.run(
+            [sys.executable, '-c', code],
+            cwd=settings.BASE_DIR,
+            env={**os.environ, 'DJANGO_SETTINGS_MODULE': 'config.settings'},
+            capture_output=True, text=True,
+        )
+        self.assertIn('probe-visible', result.stderr)     # log 預設印在 stderr（標準錯誤輸出）
